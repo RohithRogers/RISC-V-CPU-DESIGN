@@ -4,7 +4,7 @@ module instr_decode(
     output wire [4:0] rd,
     output wire [2:0] funct3,
     output wire [4:0] rs1,
-    output wire [4:5] rs2,
+    output wire [4:0] rs2,
     output wire [6:0] funct7,
     output reg [31:0] immediate
 );
