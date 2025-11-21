@@ -1,23 +1,33 @@
-# Compiler and flags
+# Tools
 IVERILOG = iverilog
 VVP = vvp
+
+# Output simulation file
 TARGET = sim.vvp
 
-# Your Verilog source files
-SRC = total_tb.v riscv-core.v alu.v branch_unit.v control_unit.v data_memory.v instr_decode.v instruction_memory.v programcounter.v registers.v 
+# Verilog sources (order matters!)
+SRC =  \
+    alu.v \
+    branch_unit.v \
+    control_unit.v \
+    instr_decode.v \
+    registers.v \
+    programcounter.v \
+    unified_memory.v \
+    riscv-core.v \
+    total_tb.v
 
 # Default rule
 all: run
 
-# Compile
+# Compile into VVP simulation
 compile:
-	$(IVERILOG) -o $(TARGET) $(SRC)
+	$(IVERILOG) -Wall -o $(TARGET) $(SRC)
 
-# Run the simulation
+# Run simulation
 run: compile
 	$(VVP) $(TARGET)
 
-# Clean files
+# Cleanup
 clean:
 	rm -f $(TARGET) *.vcd
-

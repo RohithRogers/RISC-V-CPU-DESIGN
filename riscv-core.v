@@ -27,12 +27,31 @@ module core(
         .pc(pc)
     );
 
-    // Instruction memory / fetch
+    // Instruction / unified memory interface
     wire [31:0] instruction;
 
-    instr_mem imem (
+    // unified memory replaces instr_mem + data_mem
+    // unified_mem must implement:
+    //   - async instruction read: instruction = { mem[pc+3], mem[pc+2], mem[pc+1], mem[pc] }
+    //   - async/sync data read (here we assume async read)
+    //   - sync data write on posedge clk
+    // and must be initialized from a program.hex produced by objcopy -O verilog
+    wire [31:0] mem_read_data;
+    // Needed before unified_mem instantiation
+    wire [31:0] alu_result;
+    wire [31:0] rs2_data;
+    wire mem_read;
+    wire mem_write;
+
+    unified_mem mem (
+        .clk(clk),
         .pc(pc),
-        .instruction(instruction)
+        .instruction(instruction),     // fetched instruction
+        .mem_read(mem_read),
+        .mem_write(mem_write),
+        .address(alu_result),
+        .write_data(rs2_data),
+        .read_data(mem_read_data)
     );
 
     // Decode outputs
@@ -57,7 +76,6 @@ module core(
 
     // Register file
     wire [31:0] rs1_data;
-    wire [31:0] rs2_data;
 
     // Write-back wires
     wire        reg_write;
@@ -77,11 +95,8 @@ module core(
 
     // Control signals
     wire        branch;
-    wire        mem_read;
-    wire        mem_write;
     wire        alu_src;
     wire [3:0]  alu_op;
-    // mem_to_reg declared earlier as wire; comes from control unit
 
     control_unit cu (
         .opcode(opcode),
@@ -105,7 +120,6 @@ module core(
     wire [31:0] alu_a = (is_auipc) ? pc : rs1_data;      // AUIPC uses PC + imm
     wire [31:0] alu_b = (alu_src) ? immediate : rs2_data;
 
-    wire [31:0] alu_result;
     wire        alu_zero;
 
     ALU alu_unit (
@@ -130,19 +144,6 @@ module core(
     assign jal_target    = pc + immediate;                       // J-type imm expected
     assign jalr_target   = (rs1_data + immediate) & 32'hfffffffe; // JALR: rs1 + imm, LSB=0
 
-    // Data memory
-    wire [31:0] mem_read_data;
-
-    data_mem dmem (
-        .clk(clk),
-        .mem_read(mem_read),
-        .mem_write(mem_write),
-        .funct3(funct3),
-        .address(alu_result),
-        .write_data(rs2_data),
-        .read_data(mem_read_data)
-    );
-
     // Writeback selection
     wire [31:0] pc_plus4 = pc + 32'd4;
     wire [31:0] lui_value = immediate; // decode must supply U-type immediate as {inst[31:12],12'b0}
@@ -152,5 +153,4 @@ module core(
                      (reg_write && mem_to_reg)          ? mem_read_data :
                      (reg_write)                        ? alu_result :
                                                           32'd0;
-
 endmodule
