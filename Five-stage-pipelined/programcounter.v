@@ -32,9 +32,9 @@ always @(posedge clk or posedge reset) begin
     if (reset)
         pc <= 32'd0;
     else if (pc_write)
-        pc <= pc;
-    else
         pc <= pc_next;
+    else
+        pc <= pc;
 end
 
 endmodule

@@ -1,64 +1,61 @@
 `timescale 1ns/1ps
 
-module tb_debug;
+module tb_core_branch;
+
     reg clk;
     reg reset;
     wire [31:0] pc_out;
 
-    // Instantiate DUT (core)
+    // DUT
     core uut (
         .clk(clk),
         .reset(reset),
         .pc_out(pc_out)
     );
 
-    // clock
-    initial begin
-        clk = 0;
-        forever #5 clk = ~clk;
-    end
-    
-    task print_word(input integer addr);
-        reg [31:0] word;
-    begin
-        word = { uut.mem.memory[addr+3],
-                 uut.mem.memory[addr+2],
-                 uut.mem.memory[addr+1],
-                 uut.mem.memory[addr+0] };
-
-        $display("MEM[0x%04h] = %08h", addr, word);
-    end
-    endtask
-    
-    task dump_range(input integer start, input integer count);
-        integer i;
-    begin
-        $display("\n--- MEMORY DUMP: 0x%04h to 0x%04h ---",
-                 start, start + count*4);
-
-        for (i = 0; i < count; i = i + 1)
-            print_word(start + i*4);
-
-        $display("--- END MEMORY DUMP ---\n");
-    end
-    endtask
-
+    // Clock: 10ns period
+    always #5 clk = ~clk;
 
     initial begin
-        $dumpfile("debug.vcd");
-        $dumpvars(0, tb_debug);
-
-        $display("\n=== DEBUG TB START ===");
+        clk   = 0;
         reset = 1;
-        repeat (4) @(posedge clk);
+
+        $dumpfile("branch_test.vcd");
+        $dumpvars(0, tb_core_branch);
+
+        #20;
         reset = 0;
-        repeat (1) @(posedge clk);
-        dump_range(32'h00000024, 5);
-        $monitor("Time : %t x5: %d  x6 = %d x7 = %d x10 = %d",$time,uut.regs.regfile[5],uut.regs.regfile[6],uut.regs.regfile[7],uut.regs.regfile[10]);
-        repeat(600) @(posedge clk);
-        $finish();
-           
+
+        // Let it run for some cycles
+        repeat (80) @(posedge clk);
+
+        $display("\n==== FINAL REGISTER VALUES ====");
+        $display("x3 = %0d", uut.regs.regfile[3]);
+        $display("x4 = %0d", uut.regs.regfile[4]);
+        $display("x5 = %0d", uut.regs.regfile[5]);
+        $display("x6 = %0d", uut.regs.regfile[6]);
+        $display("x7 = %0d", uut.regs.regfile[7]);
+        $display("x8 = %0d", uut.regs.regfile[8]);
+        $display("x9 = %0d", uut.regs.regfile[9]);
+        $display("x10 = %0d", uut.regs.regfile[10]);
+        
+
+        $finish;
     end
-    
+
+    // Cycle-by-cycle monitor
+    always @(posedge clk) begin
+        if (!reset) begin
+            $display("T=%0t | PC=%08h | x9=%0d x10=%0d x11=%0d x12=%0d",
+                     $time,
+                     pc_out,
+                     uut.regs.regfile[9],
+                     uut.regs.regfile[10],
+                     uut.regs.regfile[11],
+                     uut.regs.regfile[12],
+                     );
+        end
+    end
 
 endmodule
+

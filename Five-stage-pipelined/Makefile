@@ -14,6 +14,8 @@ SRC =  \
     registers.v \
     programcounter.v \
     unified_memory.v \
+    forward_unit.v\
+    stalling_unit.v\
     riscv-core.v \
     total_tb.v
 

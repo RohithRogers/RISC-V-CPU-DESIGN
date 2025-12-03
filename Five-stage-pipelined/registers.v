@@ -1,3 +1,4 @@
+`timescale 1ns/1ps
 module registers(
     input wire clk,
     input wire we,

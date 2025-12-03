@@ -1,4 +1,5 @@
 `timescale 1ns/1ps
+
 module core(
     input  wire        clk,
     input  wire        reset,
@@ -10,13 +11,14 @@ module core(
     // =========================
     wire [31:0] pc;
     assign pc_out = pc;
-    wire pc_write;
 
-    // These come from EX stage
+    // These come from EX stage (control flow)
     wire        ex_branch_taken;
     wire [31:0] ex_branch_target;
-    wire        ex_jal, ex_jalr;
     wire [31:0] ex_jal_target, ex_jalr_target;
+
+    // Stall control
+    wire pc_write;
 
     programcounter pc_reg (
         .clk(clk),
@@ -35,7 +37,7 @@ module core(
     wire [31:0] instruction;
     wire [31:0] mem_read_data;
 
-    // MEM stage addr/data/control (will come from EX/MEM)
+    // MEM stage addr/data/control (from EX/MEM)
     wire [31:0] mem_alu_result;
     wire [31:0] mem_rs2;
     wire        mem_mem_read;
@@ -59,9 +61,23 @@ module core(
     wire [31:0] if_id_instr;
     wire        if_id_write;
 
-    // Flush on taken branch or JAL/JALR (control hazard)
+    // We'll use a registered branch_taken for stable flushing
+    reg ex_branch_taken_r;
+
+    always @(posedge clk) begin
+        if (reset)
+            ex_branch_taken_r <= 1'b0;
+        else
+            ex_branch_taken_r <= ex_branch_taken;
+    end
+
+    // IF/ID flush on taken branch or JAL/JALR (from EX stage)
     wire flush_if_id;
-    assign flush_if_id = ex_branch_taken | ex_jal | ex_jalr;
+    // ex_jal/ex_jalr will be defined later (from ID/EX)
+    wire ex_jal;
+    wire ex_jalr;
+
+    assign flush_if_id = ex_branch_taken_r | ex_jal | ex_jalr;
 
     IF_ID if_id_reg (
         .clk(clk),
@@ -162,13 +178,16 @@ module core(
     wire       ex_mem_to_reg;
     wire       ex_reg_write;
     wire       ex_branch;
-    wire       ex_jal;
-    wire       ex_jalr;
+    // ex_jal, ex_jalr already declared as wires above
+
+    // Load-use stall hazard flush for ID/EX
+    wire flush_id_ex_stall;
 
     // Branch/JAL/JALR flush for ID/EX
-    wire flush_id_ex_branch = ex_branch_taken | ex_jal | ex_jalr;
-    wire flush_id_ex_stall;
-    wire flush_id_ex = flush_id_ex_branch | flush_id_ex_stall;
+    wire flush_id_ex_branch;
+    assign flush_id_ex_branch = ex_branch_taken_r | ex_jal | ex_jalr;
+
+    wire flush_id_ex = flush_id_ex_stall;
 
     ID_EX id_ex_reg (
         .clk(clk),
@@ -214,65 +233,54 @@ module core(
     );
     
     // =========================
-    // Stall (load-use hazard) unit
+    // Load-use stall unit (simple inline logic)
     // =========================
-    stall_unit St(
-        .id_ex_mem_read(ex_mem_read),
-        .id_ex_rd(ex_rd),
-        .if_id_rs1(rs1_addr),
-        .if_id_rs2(rs2_addr),
-        .pc_write(pc_write),
-        .if_id_write(if_id_write),
-        .id_ex_flush(flush_id_ex_stall)
-    );
+    wire load_use_hazard;
+    assign load_use_hazard =
+        ex_mem_read &&
+        (ex_rd != 5'd0) &&
+        ((ex_rd == rs1_addr) || (ex_rd == rs2_addr));
+
+    assign pc_write        = ~load_use_hazard;
+    assign if_id_write     = ~load_use_hazard;
+    assign flush_id_ex_stall = load_use_hazard;
 
     // =========================
-    // EX stage (with forwarding)
+    // EX stage (with integrated forwarding)
     // =========================
     wire is_auipc_ex = (ex_opcode == 7'b0010111);
     wire is_lui_ex   = (ex_opcode == 7'b0110111);
     
-    wire [1:0] forwardA, forwardB;
-
-    // From EX/MEM and MEM/WB
+    // From EX/MEM and MEM/WB for forwarding
     wire [4:0]  mem_rd;
     wire        mem_reg_write;
-    wire [4:0]  wb_rd;
-    wire        wb_reg_write;
+    wire        wb_mem_to_reg;
+    wire        wb_jal;
+    wire        wb_jalr;
+    wire        wb_is_lui;
 
-    forward_unit fu(
-        .rs1_in(ex_rs1_addr),
-        .rs2_in(ex_rs2_addr),
-        .ex_mem_rd(mem_rd),
-        .ex_mem_reg_write(mem_reg_write),
-        .mem_wb_rd(wb_rd),
-        .mem_wb_reg_write(wb_reg_write),
-        .forwardA(forwardA),
-        .forwardB(forwardB)
-    );
-    
     // Forwarded operands to ALU
     reg [31:0] alu_rs1;
     reg [31:0] alu_rs2;
 
     always @(*) begin
-        // ALU input A forwarding
-        case (forwardA)
-            2'b00: alu_rs1 = ex_rs1_data;      // from ID/EX
-            2'b10: alu_rs1 = mem_alu_result;   // from EX/MEM
-            2'b01: alu_rs1 = wb_data;          // from MEM/WB
-            default: alu_rs1 = ex_rs1_data;
-        endcase
-        
-        // ALU input B forwarding
-        case (forwardB)
-            2'b00: alu_rs2 = ex_rs2_data;
-            2'b10: alu_rs2 = mem_alu_result;
-            2'b01: alu_rs2 = wb_data;
-            default: alu_rs2 = ex_rs2_data;
-        endcase
+        // Default: from ID/EX
+        alu_rs1 = ex_rs1_data;
+        alu_rs2 = ex_rs2_data;
+
+        // Forward for rs1
+        if (mem_reg_write && (mem_rd != 5'd0) && (mem_rd == ex_rs1_addr))
+            alu_rs1 = mem_alu_result;
+        else if (wb_reg_write && (wb_rd != 5'd0) && (wb_rd == ex_rs1_addr))
+            alu_rs1 = wb_data;
+
+        // Forward for rs2
+        if (mem_reg_write && (mem_rd != 5'd0) && (mem_rd == ex_rs2_addr))
+            alu_rs2 = mem_alu_result;
+        else if (wb_reg_write && (wb_rd != 5'd0) && (wb_rd == ex_rs2_addr))
+            alu_rs2 = wb_data;
     end
-        
+
     wire [31:0] ex_alu_a = is_auipc_ex ? ex_pc  : alu_rs1;
     wire [31:0] ex_alu_b = ex_alu_src  ? ex_imm : alu_rs2;
 
@@ -287,7 +295,7 @@ module core(
         .zero(ex_alu_zero)
     );
 
-    // Branch unit (EX) — must use forwarded operands!
+    // Branch unit (EX) — uses forwarded operands
     branch_unit bu (
         .branch(ex_branch),
         .rs1(alu_rs1),
@@ -295,8 +303,8 @@ module core(
         .funct3(ex_funct3),
         .branch_taken(ex_branch_taken)
     );
-
-    // Branch / Jump targets (EX) — also use forwarded rs1 for JALR
+    
+    // Branch / Jump targets (EX) — use EX PC and forwarded rs1
     assign ex_branch_target = ex_pc + ex_imm;
     assign ex_jal_target    = ex_pc + ex_imm;
     assign ex_jalr_target   = (alu_rs1 + ex_imm) & 32'hffff_fffe;
@@ -352,10 +360,6 @@ module core(
     wire [31:0] wb_alu_result;
     wire [31:0] wb_pc_plus4;
     wire [31:0] wb_imm;
-    wire        wb_mem_to_reg;
-    wire        wb_jal;
-    wire        wb_jalr;
-    wire        wb_is_lui;
 
     MEM_WB mem_wb_reg (
         .clk(clk),
@@ -393,4 +397,253 @@ module core(
         (wb_reg_write && wb_mem_to_reg)       ? wb_mem_data :
                                                wb_alu_result;
 
+endmodule
+
+
+// =========================
+// Pipeline register modules
+// =========================
+
+module IF_ID (
+    input  wire        clk,
+    input  wire        reset,
+    input  wire        flush,
+    input  wire        if_id_write,
+    input  wire [31:0] pc_in,
+    input  wire [31:0] instr_in,
+    output reg  [31:0] pc_out,
+    output reg  [31:0] instr_out
+);
+    always @(posedge clk) begin
+        if (reset || flush) begin
+            pc_out    <= 32'd0;
+            // NOP = ADDI x0,x0,0 = 0x00000013
+            instr_out <= 32'h00000013;
+        end
+        else if (if_id_write) begin
+            pc_out    <= pc_in;
+            instr_out <= instr_in;
+        end
+    end
+endmodule
+
+
+module ID_EX (
+    input  wire        clk,
+    input  wire        reset,
+    input  wire        flush,
+
+    input  wire [31:0] pc_in,
+    input  wire [31:0] rs1_in,
+    input  wire [31:0] rs2_in,
+    input  wire [4:0]  rs1_addr_in,
+    input  wire [4:0]  rs2_addr_in,
+    input  wire [31:0] imm_in,
+    input  wire [4:0]  rd_in,
+    input  wire [2:0]  funct3_in,
+    input  wire [6:0]  opcode_in,
+
+    input  wire [3:0]  alu_op_in,
+    input  wire        alu_src_in,
+    input  wire        mem_read_in,
+    input  wire        mem_write_in,
+    input  wire        mem_to_reg_in,
+    input  wire        reg_write_in,
+    input  wire        branch_in,
+    input  wire        jal_in,
+    input  wire        jalr_in,
+
+    output reg  [31:0] pc_out,
+    output reg  [31:0] rs1_out,
+    output reg  [31:0] rs2_out,
+    output reg  [4:0]  rs1_addr_out,
+    output reg  [4:0]  rs2_addr_out,
+    output reg  [31:0] imm_out,
+    output reg  [4:0]  rd_out,
+    output reg  [2:0]  funct3_out,
+    output reg  [6:0]  opcode_out,
+
+    output reg  [3:0]  alu_op_out,
+    output reg         alu_src_out,
+    output reg         mem_read_out,
+    output reg         mem_write_out,
+    output reg         mem_to_reg_out,
+    output reg         reg_write_out,
+    output reg         branch_out,
+    output reg         jal_out,
+    output reg         jalr_out
+);
+    always @(posedge clk) begin
+        if (reset) begin
+            pc_out         <= 32'd0;
+            rs1_out        <= 32'd0;
+            rs2_out        <= 32'd0;
+            rs1_addr_out   <= 5'd0;
+            rs2_addr_out   <= 5'd0;
+            imm_out        <= 32'd0;
+            rd_out         <= 5'd0;
+            funct3_out     <= 3'd0;
+            opcode_out     <= 7'd0;
+
+            alu_op_out     <= 4'd0;
+            alu_src_out    <= 1'b0;
+            mem_read_out   <= 1'b0;
+            mem_write_out  <= 1'b0;
+            mem_to_reg_out <= 1'b0;
+            reg_write_out  <= 1'b0;
+            branch_out     <= 1'b0;
+            jal_out        <= 1'b0;
+            jalr_out       <= 1'b0;
+        end else begin
+            // Data path always updates
+            pc_out       <= pc_in;
+            rs1_out      <= rs1_in;
+            rs2_out      <= rs2_in;
+            rs1_addr_out <= rs1_addr_in;
+            rs2_addr_out <= rs2_addr_in;
+            imm_out      <= imm_in;
+            rd_out       <= rd_in;
+            funct3_out   <= funct3_in;
+            opcode_out   <= opcode_in;
+
+            if (flush) begin
+                // On flush: turn this into a NOP by clearing only control
+                alu_op_out     <= 4'd0;
+                alu_src_out    <= 1'b0;
+                mem_read_out   <= 1'b0;
+                mem_write_out  <= 1'b0;
+                mem_to_reg_out <= 1'b0;
+                reg_write_out  <= 1'b0;
+                branch_out     <= 1'b0;
+                jal_out        <= 1'b0;
+                jalr_out       <= 1'b0;
+            end else begin
+                alu_op_out     <= alu_op_in;
+                alu_src_out    <= alu_src_in;
+                mem_read_out   <= mem_read_in;
+                mem_write_out  <= mem_write_in;
+                mem_to_reg_out <= mem_to_reg_in;
+                reg_write_out  <= reg_write_in;
+                branch_out     <= branch_in;
+                jal_out        <= jal_in;
+                jalr_out       <= jalr_in;
+            end
+        end
+    end
+endmodule
+
+
+module EX_MEM (
+    input  wire        clk,
+    input  wire        reset,
+
+    input  wire [31:0] alu_result_in,
+    input  wire [31:0] rs2_in,
+    input  wire [4:0]  rd_in,
+    input  wire        mem_read_in,
+    input  wire        mem_write_in,
+    input  wire        mem_to_reg_in,
+    input  wire        reg_write_in,
+    input  wire        jal_in,
+    input  wire        jalr_in,
+    input  wire        is_lui_in,
+    input  wire [31:0] pc_plus4_in,
+    input  wire [31:0] imm_in,
+
+    output reg  [31:0] alu_result_out,
+    output reg  [31:0] rs2_out,
+    output reg  [4:0]  rd_out,
+    output reg         mem_read_out,
+    output reg         mem_write_out,
+    output reg         mem_to_reg_out,
+    output reg         reg_write_out,
+    output reg         jal_out,
+    output reg         jalr_out,
+    output reg         is_lui_out,
+    output reg  [31:0] pc_plus4_out,
+    output reg  [31:0] imm_out
+);
+    always @(posedge clk) begin
+        if (reset) begin
+            alu_result_out <= 32'd0;
+            rs2_out        <= 32'd0;
+            rd_out         <= 5'd0;
+            mem_read_out   <= 1'b0;
+            mem_write_out  <= 1'b0;
+            mem_to_reg_out <= 1'b0;
+            reg_write_out  <= 1'b0;
+            jal_out        <= 1'b0;
+            jalr_out       <= 1'b0;
+            is_lui_out     <= 1'b0;
+            pc_plus4_out   <= 32'd0;
+            imm_out        <= 32'd0;
+        end else begin
+            alu_result_out <= alu_result_in;
+            rs2_out        <= rs2_in;
+            rd_out         <= rd_in;
+            mem_read_out   <= mem_read_in;
+            mem_write_out  <= mem_write_in;
+            mem_to_reg_out <= mem_to_reg_in;
+            reg_write_out  <= reg_write_in;
+            jal_out        <= jal_in;
+            jalr_out       <= jalr_in;
+            is_lui_out     <= is_lui_in;
+            pc_plus4_out   <= pc_plus4_in;
+            imm_out        <= imm_in;
+        end
+    end
+endmodule
+
+
+module MEM_WB (
+    input  wire        clk,
+    input  wire        reset,
+
+    input  wire [31:0] mem_read_data_in,
+    input  wire [31:0] alu_result_in,
+    input  wire [4:0]  rd_in,
+    input  wire        mem_to_reg_in,
+    input  wire        reg_write_in,
+    input  wire        jal_in,
+    input  wire        jalr_in,
+    input  wire        is_lui_in,
+    input  wire [31:0] pc_plus4_in,
+    input  wire [31:0] imm_in,
+
+    output reg  [31:0] mem_read_data_out,
+    output reg  [31:0] alu_result_out,
+    output reg  [4:0]  rd_out,
+    output reg         mem_to_reg_out,
+    output reg         reg_write_out,
+    output reg         jal_out,
+    output reg         jalr_out,
+    output reg         is_lui_out,
+    output reg  [31:0] pc_plus4_out,
+    output reg  [31:0] imm_out
+);
+    always @(posedge clk) begin
+        if (reset) begin
+            mem_read_data_out <= 32'd0;
+            alu_result_out    <= 32'd0;
+            rd_out            <= 5'd0;
+            mem_to_reg_out    <= 1'b0;
+            reg_write_out     <= 1'b0;
+            jal_out           <= 1'b0;
+            jalr_out          <= 1'b0;
+            is_lui_out        <= 1'b0;
+            pc_plus4_out      <= 32'd0;
+            imm_out           <= 32'd0;
+        end else begin
+            mem_read_data_out <= mem_read_data_in;
+            alu_result_out    <= alu_result_in;
+            rd_out            <= rd_in;
+            mem_to_reg_out    <= mem_to_reg_in;
+            reg_write_out     <= reg_write_in;
+            jal_out           <= jal_in;
+            jalr_out          <= jalr_in;
+            is_lui_out        <= is_lui_in;
+            pc_plus4_out      <= pc_plus4_in;
+            imm_out           <= imm_in;
+        end
+    end
 endmodule
